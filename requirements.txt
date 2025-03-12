@@ -27,7 +27,6 @@ certifi==2025.1.31
 cffi==1.17.1
 chardet==5.2.0
 click==8.1.8
-cloud-init==24.4
 colorama==0.4.6
 colorlog==6.9.0
 comm==0.2.2
