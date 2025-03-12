@@ -4,3 +4,4 @@ numpy
 joblib
 uvicorn
 datetime
+gunicorn 
