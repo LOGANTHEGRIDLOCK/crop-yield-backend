@@ -3,5 +3,6 @@ pydantic
 numpy
 joblib
 uvicorn
+gunicorn
+lightgbm
 datetime
-gunicorn 
