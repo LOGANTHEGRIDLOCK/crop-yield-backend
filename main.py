@@ -4,9 +4,50 @@ import numpy as np
 import joblib
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
+import sqlite3
+import os
 
 # Initialize FastAPI app
 app = FastAPI()
+
+# Set up database
+DB_FILE = "crop_predictions.db"
+def setup_database():
+    # Check if database exists
+    db_exists = os.path.isfile(DB_FILE)
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    
+    # Create tables if they don't exist
+    if not db_exists:
+        cursor.execute('''
+        CREATE TABLE predictions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT,
+            crop TEXT,
+            region TEXT,
+            yield_value REAL,
+            created_at TEXT
+        )
+        ''')
+        
+        cursor.execute('''
+        CREATE TABLE archived_predictions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT,
+            crop TEXT,
+            region TEXT,
+            yield_value REAL,
+            archived_at TEXT
+        )
+        ''')
+        
+        conn.commit()
+    
+    conn.close()
+
+# Call setup
+setup_database()
 
 # Load the trained LightGBM model
 model = joblib.load("lightgbm_crop_yield_model.pkl")
@@ -37,9 +78,6 @@ region_options = {v: k for k, v in region_mapping.items()}
 soil_options = {v: k for k, v in soil_mapping.items()}
 crop_options = {v: k for k, v in crop_mapping.items()}
 weather_options = {v: k for k, v in weather_mapping.items()}
-
-# Store prediction history
-prediction_history = []
 
 # Average yield for different crops
 crop_avg_yield = {
@@ -106,14 +144,16 @@ def predict_yield(data: CropInput):
                 ]
             }
 
-        # Save to history
-        new_prediction = {
-            "date": datetime.now().isoformat(),
-            "crop": data.crop,
-            "region": data.region,
-            "yield": prediction
-        }
-        prediction_history.append(new_prediction)
+        # Save prediction to database
+        current_time = datetime.now().isoformat()
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO predictions (date, crop, region, yield_value, created_at) VALUES (?, ?, ?, ?, ?)",
+            (current_time, data.crop, data.region, prediction, current_time)
+        )
+        conn.commit()
+        conn.close()
         
         return {
             "predicted_yield": prediction,
@@ -128,18 +168,104 @@ def predict_yield(data: CropInput):
         return {"error": str(e)}
 
 @app.get("/history")
-def get_prediction_history():
-    return {"history": prediction_history}
-
-archived_predictions = []
+def get_prediction_history(time_period: str = "all"):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    
+    current_date = datetime.now()
+    
+    # Define time filters based on the requested period
+    if time_period == "week":
+        # Get records from the last 7 days
+        start_date = (current_date.replace(hour=0, minute=0, second=0, microsecond=0) - 
+                      datetime.timedelta(days=7)).isoformat()
+        cursor.execute("SELECT date, crop, region, yield_value FROM predictions WHERE date >= ?", (start_date,))
+    elif time_period == "month":
+        # Get records from the last 30 days
+        start_date = (current_date.replace(hour=0, minute=0, second=0, microsecond=0) - 
+                      datetime.timedelta(days=30)).isoformat()
+        cursor.execute("SELECT date, crop, region, yield_value FROM predictions WHERE date >= ?", (start_date,))
+    elif time_period == "year":
+        # Get records from the last 365 days
+        start_date = (current_date.replace(hour=0, minute=0, second=0, microsecond=0) - 
+                      datetime.timedelta(days=365)).isoformat()
+        cursor.execute("SELECT date, crop, region, yield_value FROM predictions WHERE date >= ?", (start_date,))
+    else:
+        # Get all records
+        cursor.execute("SELECT date, crop, region, yield_value FROM predictions")
+    
+    rows = cursor.fetchall()
+    history = []
+    for row in rows:
+        history.append({
+            "date": row[0],
+            "crop": row[1],
+            "region": row[2],
+            "yield": row[3]
+        })
+    
+    conn.close()
+    return {"history": history}
 
 @app.post("/archive")
 def archive_predictions():
-    global prediction_history, archived_predictions
-    archived_predictions.extend(prediction_history)
-    prediction_history.clear()
-    return {"message": "Predictions archived successfully"}
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    
+    # Get all current predictions
+    cursor.execute("SELECT date, crop, region, yield_value FROM predictions")
+    predictions = cursor.fetchall()
+    
+    # Insert into archived_predictions
+    archive_time = datetime.now().isoformat()
+    for pred in predictions:
+        cursor.execute(
+            "INSERT INTO archived_predictions (date, crop, region, yield_value, archived_at) VALUES (?, ?, ?, ?, ?)",
+            (pred[0], pred[1], pred[2], pred[3], archive_time)
+        )
+    
+    # Clear the predictions table
+    cursor.execute("DELETE FROM predictions")
+    
+    conn.commit()
+    conn.close()
+    
+    return {"message": f"Successfully archived {len(predictions)} predictions"}
 
+@app.get("/history/stats")
+def get_history_stats():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    
+    # Get count of predictions by crop type
+    cursor.execute("SELECT crop, COUNT(*) FROM predictions GROUP BY crop")
+    crop_counts = dict(cursor.fetchall())
+    
+    # Get count of predictions by region
+    cursor.execute("SELECT region, COUNT(*) FROM predictions GROUP BY region")
+    region_counts = dict(cursor.fetchall())
+    
+    # Get average yield by crop
+    cursor.execute("SELECT crop, AVG(yield_value) FROM predictions GROUP BY crop")
+    crop_avgs = {crop: round(avg, 2) for crop, avg in cursor.fetchall()}
+    
+    # Get count of total predictions
+    cursor.execute("SELECT COUNT(*) FROM predictions")
+    total_count = cursor.fetchone()[0]
+    
+    # Get count of total archived predictions
+    cursor.execute("SELECT COUNT(*) FROM archived_predictions")
+    total_archived = cursor.fetchone()[0]
+    
+    conn.close()
+    
+    return {
+        "total_predictions": total_count,
+        "total_archived": total_archived,
+        "by_crop": crop_counts,
+        "by_region": region_counts,
+        "average_yields": crop_avgs
+    }
 
 app.add_middleware(
     CORSMiddleware,
