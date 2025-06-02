@@ -56,7 +56,7 @@ model = joblib.load("lightgbm_crop_yield_model.pkl")
 label_encoders = joblib.load("label_encoders.pkl")
 
 # Weather API key (set your real key here)
-WEATHER_API_KEY = "c1cd908872dbeaef6ce4f1888936dbe0"
+WEATHER_API_KEY = "82e612fbadcbde73be0b69fe6e2d4dca"
 
 def get_weather_data(region: str):
     # Map Nigerian regions to major cities
