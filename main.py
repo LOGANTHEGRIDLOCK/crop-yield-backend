@@ -5,18 +5,18 @@ import joblib
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timedelta
 from supabase import create_client, Client
-from dotenv import load_dotenv
+
 import os
 
 # Load environment variables
-load_dotenv()
+
 
 # Initialize FastAPI app
 app = FastAPI()
 
 # Initialize Supabase client
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_URL = "SUPABASE_URL=https://gffzsgzzhqfyhglounko.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdmZnpzZ3p6aHFmeWhnbG91bmtvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDg4ODAyOTIsImV4cCI6MjA2NDQ1NjI5Mn0.Kcip4FIem4R6w42dHzibEY6GV5bmnYF7joZZWoVja8w"
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("Please set SUPABASE_URL and SUPABASE_KEY in your .env file")
