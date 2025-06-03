@@ -1,59 +1,36 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import numpy as np
 import joblib
 from fastapi.middleware.cors import CORSMiddleware
-from datetime import datetime
-import sqlite3
+from datetime import datetime, timedelta
+from supabase import create_client, Client
+from dotenv import load_dotenv
 import os
+
+# Load environment variables
+load_dotenv()
 
 # Initialize FastAPI app
 app = FastAPI()
 
-# Set up database
-DB_FILE = "crop_predictions.db"
-def setup_database():
-    # Check if database exists
-    db_exists = os.path.isfile(DB_FILE)
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    
-    # Create tables if they don't exist
-    if not db_exists:
-        cursor.execute('''
-        CREATE TABLE predictions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT,
-            crop TEXT,
-            region TEXT,
-            yield_value REAL,
-            created_at TEXT
-        )
-        ''')
-        
-        cursor.execute('''
-        CREATE TABLE archived_predictions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT,
-            crop TEXT,
-            region TEXT,
-            yield_value REAL,
-            archived_at TEXT
-        )
-        ''')
-        
-        conn.commit()
-    
-    conn.close()
+# Initialize Supabase client
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-# Call setup
-setup_database()
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("Please set SUPABASE_URL and SUPABASE_KEY in your .env file")
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Load the trained LightGBM model
-model = joblib.load("lightgbm_crop_yield_model.pkl")
-
-# Load label encoders
-label_encoders = joblib.load("label_encoders.pkl")
+try:
+    model = joblib.load("lightgbm_crop_yield_model.pkl")
+    label_encoders = joblib.load("label_encoders.pkl")
+except FileNotFoundError as e:
+    print(f"Model files not found: {e}")
+    model = None
+    label_encoders = None
 
 # Define request model
 class CropInput(BaseModel):
@@ -87,12 +64,43 @@ crop_avg_yield = {
 
 @app.get("/")
 def home():
-    return {"message": "Crop Yield Prediction API is running!"}
+    return {"message": "Crop Yield Prediction API is running with Supabase!"}
+
+@app.get("/health")
+def health_check():
+    """Check if the API and database connection are working"""
+    try:
+        # Test Supabase connection
+        response = supabase.table("predictions").select("count", count="exact").execute()
+        return {
+            "status": "healthy",
+            "database": "connected",
+            "model_loaded": model is not None,
+            "total_predictions": response.count if response.count else 0
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "database": "disconnected",
+            "error": str(e)
+        }
 
 @app.post("/predict")
 def predict_yield(data: CropInput):
+    if model is None:
+        raise HTTPException(status_code=500, detail="ML model not loaded")
+    
     try:
         # Convert categorical inputs into encoded values
+        if data.region not in region_options:
+            raise HTTPException(status_code=400, detail=f"Invalid region. Options: {list(region_options.keys())}")
+        if data.soil_type not in soil_options:
+            raise HTTPException(status_code=400, detail=f"Invalid soil type. Options: {list(soil_options.keys())}")
+        if data.crop not in crop_options:
+            raise HTTPException(status_code=400, detail=f"Invalid crop. Options: {list(crop_options.keys())}")
+        if data.weather not in weather_options:
+            raise HTTPException(status_code=400, detail=f"Invalid weather. Options: {list(weather_options.keys())}")
+
         region_encoded = region_options[data.region]
         soil_encoded = soil_options[data.soil_type]
         crop_encoded = crop_options[data.crop]
@@ -144,16 +152,20 @@ def predict_yield(data: CropInput):
                 ]
             }
 
-        # Save prediction to database
+        # Save prediction to Supabase
         current_time = datetime.now().isoformat()
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO predictions (date, crop, region, yield_value, created_at) VALUES (?, ?, ?, ?, ?)",
-            (current_time, data.crop, data.region, prediction, current_time)
-        )
-        conn.commit()
-        conn.close()
+        prediction_data = {
+            "date": current_time,
+            "crop": data.crop,
+            "region": data.region,
+            "yield_value": prediction,
+            "created_at": current_time
+        }
+        
+        result = supabase.table("predictions").insert(prediction_data).execute()
+        
+        if not result.data:
+            raise HTTPException(status_code=500, detail="Failed to save prediction to database")
         
         return {
             "predicted_yield": prediction,
@@ -161,121 +173,194 @@ def predict_yield(data: CropInput):
             "region": data.region,
             "average_yield": average_yield,
             "optimal_yield": optimal_yield,
-            "recommendation": recommendation
+            "recommendation": recommendation,
+            "prediction_id": result.data[0]["id"]
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
-        return {"error": str(e)}
+        raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
 
 @app.get("/history")
 def get_prediction_history(time_period: str = "all"):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    
-    current_date = datetime.now()
-    
-    # Define time filters based on the requested period
-    if time_period == "week":
-        # Get records from the last 7 days
-        start_date = (current_date.replace(hour=0, minute=0, second=0, microsecond=0) - 
-                      datetime.timedelta(days=7)).isoformat()
-        cursor.execute("SELECT date, crop, region, yield_value FROM predictions WHERE date >= ?", (start_date,))
-    elif time_period == "month":
-        # Get records from the last 30 days
-        start_date = (current_date.replace(hour=0, minute=0, second=0, microsecond=0) - 
-                      datetime.timedelta(days=30)).isoformat()
-        cursor.execute("SELECT date, crop, region, yield_value FROM predictions WHERE date >= ?", (start_date,))
-    elif time_period == "year":
-        # Get records from the last 365 days
-        start_date = (current_date.replace(hour=0, minute=0, second=0, microsecond=0) - 
-                      datetime.timedelta(days=365)).isoformat()
-        cursor.execute("SELECT date, crop, region, yield_value FROM predictions WHERE date >= ?", (start_date,))
-    else:
-        # Get all records
-        cursor.execute("SELECT date, crop, region, yield_value FROM predictions")
-    
-    rows = cursor.fetchall()
-    history = []
-    for row in rows:
-        history.append({
-            "date": row[0],
-            "crop": row[1],
-            "region": row[2],
-            "yield": row[3]
-        })
-    
-    conn.close()
-    return {"history": history}
+    try:
+        current_date = datetime.now()
+        
+        # Build query based on time period
+        query = supabase.table("predictions").select("date,crop,region,yield_value,id")
+        
+        if time_period == "week":
+            start_date = (current_date - timedelta(days=7)).isoformat()
+            query = query.gte("date", start_date)
+        elif time_period == "month":
+            start_date = (current_date - timedelta(days=30)).isoformat()
+            query = query.gte("date", start_date)
+        elif time_period == "year":
+            start_date = (current_date - timedelta(days=365)).isoformat()
+            query = query.gte("date", start_date)
+        
+        # Execute query with ordering
+        result = query.order("created_at", desc=True).execute()
+        
+        history = []
+        for row in result.data:
+            history.append({
+                "id": row["id"],
+                "date": row["date"],
+                "crop": row["crop"],
+                "region": row["region"],
+                "yield": row["yield_value"]
+            })
+        
+        return {
+            "history": history,
+            "count": len(history),
+            "time_period": time_period
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch history: {str(e)}")
 
 @app.post("/archive")
 def archive_predictions():
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    
-    # Get all current predictions
-    cursor.execute("SELECT date, crop, region, yield_value FROM predictions")
-    predictions = cursor.fetchall()
-    
-    # Insert into archived_predictions
-    archive_time = datetime.now().isoformat()
-    for pred in predictions:
-        cursor.execute(
-            "INSERT INTO archived_predictions (date, crop, region, yield_value, archived_at) VALUES (?, ?, ?, ?, ?)",
-            (pred[0], pred[1], pred[2], pred[3], archive_time)
-        )
-    
-    # Clear the predictions table
-    cursor.execute("DELETE FROM predictions")
-    
-    conn.commit()
-    conn.close()
-    
-    return {"message": f"Successfully archived {len(predictions)} predictions"}
+    try:
+        # Get all current predictions
+        predictions_result = supabase.table("predictions").select("*").execute()
+        predictions = predictions_result.data
+        
+        if not predictions:
+            return {"message": "No predictions to archive"}
+        
+        # Prepare data for archiving
+        archive_time = datetime.now().isoformat()
+        archive_data = []
+        
+        for pred in predictions:
+            archive_data.append({
+                "date": pred["date"],
+                "crop": pred["crop"],
+                "region": pred["region"],
+                "yield_value": pred["yield_value"],
+                "archived_at": archive_time
+            })
+        
+        # Insert into archived_predictions
+        archive_result = supabase.table("archived_predictions").insert(archive_data).execute()
+        
+        if not archive_result.data:
+            raise HTTPException(status_code=500, detail="Failed to archive predictions")
+        
+        # Clear the predictions table
+        delete_result = supabase.table("predictions").delete().neq("id", 0).execute()
+        
+        return {
+            "message": f"Successfully archived {len(predictions)} predictions",
+            "archived_count": len(archive_result.data)
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Archive operation failed: {str(e)}")
 
 @app.get("/history/stats")
 def get_history_stats():
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    
-    # Get count of predictions by crop type
-    cursor.execute("SELECT crop, COUNT(*) FROM predictions GROUP BY crop")
-    crop_counts = dict(cursor.fetchall())
-    
-    # Get count of predictions by region
-    cursor.execute("SELECT region, COUNT(*) FROM predictions GROUP BY region")
-    region_counts = dict(cursor.fetchall())
-    
-    # Get average yield by crop
-    cursor.execute("SELECT crop, AVG(yield_value) FROM predictions GROUP BY crop")
-    crop_avgs = {crop: round(avg, 2) for crop, avg in cursor.fetchall()}
-    
-    # Get count of total predictions
-    cursor.execute("SELECT COUNT(*) FROM predictions")
-    total_count = cursor.fetchone()[0]
-    
-    # Get count of total archived predictions
-    cursor.execute("SELECT COUNT(*) FROM archived_predictions")
-    total_archived = cursor.fetchone()[0]
-    
-    conn.close()
-    
-    return {
-        "total_predictions": total_count,
-        "total_archived": total_archived,
-        "by_crop": crop_counts,
-        "by_region": region_counts,
-        "average_yields": crop_avgs
-    }
+    try:
+        # Get all predictions for analysis
+        all_predictions = supabase.table("predictions").select("*").execute()
+        predictions = all_predictions.data
+        
+        # Get archived predictions count
+        archived_result = supabase.table("archived_predictions").select("id", count="exact").execute()
+        total_archived = archived_result.count if archived_result.count else 0
+        
+        if not predictions:
+            return {
+                "total_predictions": 0,
+                "total_archived": total_archived,
+                "by_crop": {},
+                "by_region": {},
+                "average_yields": {}
+            }
+        
+        # Calculate statistics
+        crop_counts = {}
+        region_counts = {}
+        crop_yields = {}
+        
+        for pred in predictions:
+            crop = pred["crop"]
+            region = pred["region"]
+            yield_val = pred["yield_value"]
+            
+            # Count by crop
+            crop_counts[crop] = crop_counts.get(crop, 0) + 1
+            
+            # Count by region
+            region_counts[region] = region_counts.get(region, 0) + 1
+            
+            # Collect yields by crop for averaging
+            if crop not in crop_yields:
+                crop_yields[crop] = []
+            crop_yields[crop].append(yield_val)
+        
+        # Calculate average yields
+        crop_avgs = {}
+        for crop, yields in crop_yields.items():
+            crop_avgs[crop] = round(sum(yields) / len(yields), 2)
+        
+        return {
+            "total_predictions": len(predictions),
+            "total_archived": total_archived,
+            "by_crop": crop_counts,
+            "by_region": region_counts,
+            "average_yields": crop_avgs
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch stats: {str(e)}")
 
+@app.delete("/predictions/{prediction_id}")
+def delete_prediction(prediction_id: int):
+    """Delete a specific prediction by ID"""
+    try:
+        result = supabase.table("predictions").delete().eq("id", prediction_id).execute()
+        
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Prediction not found")
+        
+        return {"message": f"Prediction {prediction_id} deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete prediction: {str(e)}")
+
+@app.get("/predictions/{prediction_id}")
+def get_prediction(prediction_id: int):
+    """Get a specific prediction by ID"""
+    try:
+        result = supabase.table("predictions").select("*").eq("id", prediction_id).execute()
+        
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Prediction not found")
+        
+        return {"prediction": result.data[0]}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch prediction: {str(e)}")
+
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins (change to specific URLs in production)
+    allow_origins=["*"],  # Change to specific URLs in production
     allow_credentials=True,
-    allow_methods=["*"],  # Allow all HTTP methods
-    allow_headers=["*"],  # Allow all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Run the API
-if __name__ != "__main__":
+if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
