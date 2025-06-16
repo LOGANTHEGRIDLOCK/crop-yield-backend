@@ -1,0 +1,3 @@
+# Initialize Supabase client
+SUPABASE_URL = "https://gffzsgzzhqfyhglounko.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdmZnpzZ3p6aHFmeWhnbG91bmtvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDg4ODAyOTIsImV4cCI6MjA2NDQ1NjI5Mn0.Kcip4FIem4R6w42dHzibEY6GV5bmnYF7joZZWoVja8w"
