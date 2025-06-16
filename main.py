@@ -11,8 +11,12 @@ import os
 
 # Load environment variables
 
+#making update
 
-# Initialize FastAPI app
+
+
+
+# Initialize FastAPI app 
 app = FastAPI()
 
 # Initialize Supabase client
