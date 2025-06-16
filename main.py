@@ -52,7 +52,7 @@ crop_avg_yield = {
     "Rice": 4.6, "Cotton": 2.1, "Barley": 3.9
 }
 
-# Models
+# Models - Fixed to only include fields that frontend sends
 class CropInput(BaseModel):
     soil_type: str
     crop: str
@@ -64,27 +64,33 @@ class CropInput(BaseModel):
 
 # Utilities check
 def get_weather_data(lat: float, lon: float):
-    url = (
-        f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}"
-        f"&appid={OPENWEATHER_API_KEY}&units=metric"
-    )
-    response = requests.get(url)
-    if response.status_code != 200:
-        raise Exception(f"Weather API error: {response.text}")
+    try:
+        url = (
+            f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}"
+            f"&appid={OPENWEATHER_API_KEY}&units=metric"
+        )
+        response = requests.get(url, timeout=10)
+        if response.status_code != 200:
+            # Return default values if weather API fails
+            return 25.0, 50.0, "Sunny"
 
-    data = response.json()
-    avg_temp = data["main"]["temp"]
-    rainfall = data.get("rain", {}).get("1h", 0.0)
-    weather_main = data["weather"][0]["main"]
+        data = response.json()
+        avg_temp = data["main"]["temp"]
+        rainfall = data.get("rain", {}).get("1h", 0.0)
+        weather_main = data["weather"][0]["main"]
 
-    if weather_main.lower() in ["clear"]:
-        weather = "Sunny"
-    elif weather_main.lower() in ["clouds"]:
-        weather = "Cloudy"
-    else:
-        weather = "Rainy"
+        if weather_main.lower() in ["clear"]:
+            weather = "Sunny"
+        elif weather_main.lower() in ["clouds"]:
+            weather = "Cloudy"
+        else:
+            weather = "Rainy"
 
-    return avg_temp, rainfall, weather
+        return avg_temp, rainfall, weather
+    except Exception as e:
+        print(f"Weather API error: {e}")
+        # Return default values if weather API fails
+        return 25.0, 50.0, "Sunny"
 
 def get_region_from_latlon(lat: float, lon: float) -> str:
     if lat >= 10.0:
@@ -127,9 +133,11 @@ def predict_yield(data: CropInput):
         raise HTTPException(status_code=500, detail="ML model not loaded")
 
     try:
+        # Get weather data and region from latitude/longitude
         avg_temp, avg_rainfall, weather_str = get_weather_data(data.latitude, data.longitude)
         region_str = get_region_from_latlon(data.latitude, data.longitude)
 
+        # Validate inputs
         if data.soil_type not in soil_options:
             raise HTTPException(status_code=400, detail=f"Invalid soil type. Options: {list(soil_options.keys())}")
         if data.crop not in crop_options:
@@ -139,6 +147,7 @@ def predict_yield(data: CropInput):
         if region_str not in region_options:
             raise HTTPException(status_code=400, detail=f"Invalid region: {region_str}")
 
+        # Encode categorical variables
         region_encoded = region_options[region_str]
         soil_encoded = soil_options[data.soil_type]
         crop_encoded = crop_options[data.crop]
@@ -146,13 +155,16 @@ def predict_yield(data: CropInput):
         fertilizer_value = int(data.fertilizer_used)
         irrigation_value = int(data.irrigation_used)
 
+        # Prepare input data for model
         input_data = np.array([[region_encoded, soil_encoded, crop_encoded, avg_rainfall, avg_temp,
                                 fertilizer_value, irrigation_value, weather_encoded, data.days_to_harvest]])
 
+        # Make prediction
         prediction = round(model.predict(input_data)[0], 2)
         average_yield = crop_avg_yield.get(data.crop, 4.0)
         optimal_yield = round(average_yield * 1.2, 2)
 
+        # Generate recommendations based on prediction
         if prediction < 3:
             recommendation = {
                 "status": "Low yield detected",
@@ -181,6 +193,7 @@ def predict_yield(data: CropInput):
                 ]
             }
 
+        # Save prediction to database
         now = datetime.now().isoformat()
         prediction_data = {
             "date": now,
@@ -190,7 +203,12 @@ def predict_yield(data: CropInput):
             "created_at": now
         }
 
-        result = supabase.table("predictions").insert(prediction_data).execute()
+        try:
+            result = supabase.table("predictions").insert(prediction_data).execute()
+            prediction_id = result.data[0]["id"] if result.data else None
+        except Exception as db_error:
+            print(f"Database error: {db_error}")
+            prediction_id = None
 
         return {
             "predicted_yield": prediction,
@@ -199,12 +217,18 @@ def predict_yield(data: CropInput):
             "average_yield": average_yield,
             "optimal_yield": optimal_yield,
             "recommendation": recommendation,
-            "prediction_id": result.data[0]["id"]
+            "prediction_id": prediction_id,
+            "weather_data": {
+                "temperature": avg_temp,
+                "rainfall": avg_rainfall,
+                "condition": weather_str
+            }
         }
 
     except HTTPException:
         raise
     except Exception as e:
+        print(f"Prediction error: {e}")
         raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
     
 @app.get("/history")
