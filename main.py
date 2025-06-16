@@ -62,7 +62,7 @@ class CropInput(BaseModel):
     latitude: float
     longitude: float
 
-# Utilities
+# Utilities check
 def get_weather_data(lat: float, lon: float):
     url = (
         f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}"
